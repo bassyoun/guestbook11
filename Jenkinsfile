@@ -4,26 +4,49 @@ def TODAY = (new SimpleDateFormat("yyyyMMddHHmmss")).format(new Date())
 
 pipeline {
     agent any
-
     environment {
-        IMAGE_REGISTRY_URI="905418245679.dkr.ecr.ap-northeast-2.amazonaws.com"
-        IMAGE_TAG = "${TODAY}_${BUILD_ID}"
-        IMAGE_NAME = "${IMAGE_REGISTRY_URI}/guestbook:${IMAGE_TAG}"
+        strDockerTag = "${TODAY}_${BUILD_ID}"
+        strDockerImage ="bassyoun/cicd_guestbook:${strDockerTag}"
     }
 
     stages {
-        stage('AWS CodeBuild') {
+        stage('Checkout') {
             steps {
-                awsCodeBuild(
-                    credentialsType: 'keys',
-                    credentialsId: 'AWS_IAM_administrator_Credential',
-                    region: 'ap-northeast-2',
-                    projectName: 'guestbook',
-                    sourceControlType: 'project',
-                    sseAlgorithm: 'AES256',
-                    envVariables: "[ { IMAGE_TAG, ${IMAGE_TAG} } ]",
-                    buildSpecFile: "codebuild/buildspec.yml"
-                )
+                git branch: 'master', url:'https://github.com/bassyoun/guestbook11.git'
+            }
+        }
+        stage('Build') {
+            steps {
+                sh './mvnw clean package'
+            }
+        }
+        stage('Unit Test') {
+            steps {
+                sh './mvnw test'
+            }
+            
+            post {
+                always {
+                    junit '**/target/surefire-reports/TEST-*.xml'
+                }
+            }
+        }
+
+        stage('Docker Image Build') {
+            steps {
+                script {
+                    //oDockImage = docker.build(strDockerImage)
+                    oDockImage = docker.build(strDockerImage, "--build-arg VERSION=${strDockerTag} -f Dockerfile .")
+                }
+            }
+        }
+        stage('Docker Image Push') {
+            steps {
+                script {
+                    docker.withRegistry('', 'DockerHub_Credential') {
+                        oDockImage.push()
+                    }
+                }
             }
         }
 
@@ -31,9 +54,7 @@ pipeline {
             steps {
                 sshagent(credentials: ['Staging-PrivateKey']) {
                     sh "ssh -o StrictHostKeyChecking=no ec2-user@172.31.0.110 docker container rm -f guestbookapp"
-                    sh "ssh -o StrictHostKeyChecking=no ec2-user@172.31.0.110  aws ecr get-login-password --region ap-northeast-2 | docker login --username AWS --password-stdin ${IMAGE_REGISTRY_URI}"
-                    sh "ssh -o StrictHostKeyChecking=no ec2-user@172.31.0.110 \
-                                        docker container run \
+                    sh "ssh -o StrictHostKeyChecking=no ec2-user@172.31.0.110 docker container run \
                                         -d \
                                         --name=guestbookapp \
                                         --network=host \
@@ -43,9 +64,15 @@ pipeline {
                                         -e MYSQL_DATABASE=guestbook \
                                         -e MYSQL_USER=root \
                                         -e MYSQL_PASSWORD=education \
-                                        ${IMAGE_NAME} "
+                                        ${strDockerImage} "
                 }
             }
+        }
+        stage ('JMeter LoadTest') {
+            steps { 
+                sh '~/lab/sw/jmeter/bin/jmeter.sh -j jmeter.save.saveservice.output_format=xml -n -t src/main/jmx/guestbook_loadtest.jmx -l loadtest_result.jtl' 
+                perfReport filterRegex: '', showTrendGraphs: true, sourceDataFiles: 'loadtest_result.jtl' 
+            } 
         }
     }
 }
